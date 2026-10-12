@@ -18,6 +18,7 @@
 #include <QBuffer>
 #include <QDebug>
 #include <QFileInfo>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QStandardPaths>
@@ -1961,6 +1962,119 @@ void KArchiveTest::test7ZipReadNumber()
     QCOMPARE(listing[0], QString("mode=644 path=file.txt type=file size=5"));
 
     QVERIFY(k7zip.close());
+}
+
+// This test was added to verify that K7ZipPrivate::readNumber() decodes values
+// which do not fit in 32 bits. The archive holds 2 GiB of zeros, so the unpack
+// size stored in its header is 0x80000000. Before the fix the byte carrying bit
+// 31 was promoted to int before being shifted left by 24, which made the int
+// negative and sign-extended it to 0xffffffff80000000, reported here as -2147483648.
+// See: https://invent.kde.org/frameworks/karchive/-/merge_requests/213
+void KArchiveTest::test7ZipLargeUnpackSize()
+{
+    const QString fileName = QFINDTESTDATA("data/7z_large_unpack_size.7z");
+    QVERIFY(!fileName.isEmpty());
+
+    K7Zip k7zip(fileName);
+    QVERIFY2(k7zip.open(QIODevice::ReadOnly), "data/7z_large_unpack_size.7z");
+
+    const KArchiveDirectory *dir = k7zip.directory();
+    QVERIFY(dir != nullptr);
+
+    const KArchiveEntry *entry = dir->entry(QStringLiteral("2gib-zeros.bin"));
+    QVERIFY(entry != nullptr);
+    QVERIFY(entry->isFile());
+    QCOMPARE(static_cast<const KArchiveFile *>(entry)->size(), Q_INT64_C(2147483648));
+
+    QVERIFY(k7zip.close());
+}
+
+namespace
+{
+// A buffer that counts what is read from it.
+class CountingBuffer : public QBuffer
+{
+public:
+    qint64 bytesRead = 0;
+
+protected:
+    qint64 readData(char *data, qint64 maxSize) override
+    {
+        const qint64 n = QBuffer::readData(data, maxSize);
+        if (n > 0) {
+            bytesRead += n;
+        }
+        return n;
+    }
+};
+}
+
+void KArchiveTest::test7ZipListingDecodesNoFileData()
+{
+    // Random bytes do not compress, so the packed stream is about as large as the file.
+    QByteArray content(512 * 1024, Qt::Uninitialized);
+    QRandomGenerator generator(42);
+    generator.fillRange(reinterpret_cast<quint32 *>(content.data()), content.size() / sizeof(quint32));
+    const QByteArray small("small file");
+
+    QBuffer written;
+    {
+        K7Zip writer(&written);
+        QVERIFY(writer.open(QIODevice::WriteOnly));
+        QVERIFY(writer.writeFile(QStringLiteral("random.bin"), content));
+        QVERIFY(writer.writeFile(QStringLiteral("dir/small.txt"), small));
+        QVERIFY(writer.close());
+    }
+
+    CountingBuffer device;
+    device.setData(written.data());
+    K7Zip reader(&device);
+    QVERIFY(reader.open(QIODevice::ReadOnly));
+    const KArchiveFile *random = reader.directory()->file(QStringLiteral("random.bin"));
+    const KArchiveFile *smallFile = reader.directory()->file(QStringLiteral("dir/small.txt"));
+    QVERIFY(random);
+    QVERIFY(smallFile);
+    QCOMPARE(random->size(), content.size());
+
+    // Listing reads the headers, not the content of the files.
+    QVERIFY2(device.bytesRead < content.size() / 10, qPrintable(QStringLiteral("%1 bytes read to list the archive").arg(device.bytesRead)));
+
+    QCOMPARE(random->data(), content);
+    std::unique_ptr<QIODevice> smallDevice(smallFile->createDevice());
+    QCOMPARE(smallDevice->readAll(), small);
+    QVERIFY(device.bytesRead >= content.size());
+
+    QVERIFY(reader.close());
+}
+
+void KArchiveTest::test7ZipReadWriteKeepsTheFiles()
+{
+    // No symlink in the archive: decoding one is what opening needs the file data for.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString fileName = dir.filePath(QStringLiteral("readwrite.7z"));
+    {
+        K7Zip writer(fileName);
+        QVERIFY(writer.open(QIODevice::WriteOnly));
+        QVERIFY(writer.writeFile(QStringLiteral("first.txt"), QByteArray("first file")));
+        QVERIFY(writer.close());
+    }
+    {
+        K7Zip archive(fileName);
+        QVERIFY(archive.open(QIODevice::ReadWrite));
+        QVERIFY(archive.writeFile(QStringLiteral("second.txt"), QByteArray("second file")));
+        QVERIFY(archive.close());
+    }
+
+    K7Zip reader(fileName);
+    QVERIFY(reader.open(QIODevice::ReadOnly));
+    const KArchiveFile *first = reader.directory()->file(QStringLiteral("first.txt"));
+    const KArchiveFile *second = reader.directory()->file(QStringLiteral("second.txt"));
+    QVERIFY(first);
+    QVERIFY(second);
+    QCOMPARE(first->data(), QByteArray("first file"));
+    QCOMPARE(second->data(), QByteArray("second file"));
+    QVERIFY(reader.close());
 }
 
 void KArchiveTest::test7ZipFileNameEndsInSlash()

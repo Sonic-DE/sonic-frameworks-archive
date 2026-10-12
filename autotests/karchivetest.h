@@ -139,6 +139,9 @@ private Q_SLOTS:
     void test7ZipNamelessFile();
     void test7ZipMultipleNamelessFiles();
     void test7ZipReadNumber();
+    void test7ZipLargeUnpackSize();
+    void test7ZipListingDecodesNoFileData();
+    void test7ZipReadWriteKeepsTheFiles();
     void test7ZipFileNameEndsInSlash();
     void test7ZipOssFuzzIssues_data();
     void test7ZipOssFuzzIssues();
