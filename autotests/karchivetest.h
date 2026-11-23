@@ -24,6 +24,8 @@ private Q_SLOTS:
     void testEmptyFilename();
     void testNullDevice();
     void testNonExistentFile();
+    void testCreateTarNoMimetype_data();
+    void testCreateTarNoMimetype();
     void testCreateTar_data();
     void testCreateTar();
     void testCreateTarXXX_data()
@@ -68,6 +70,7 @@ private Q_SLOTS:
     void testTarLongNonASCIINames();
     void testTarShortNonASCIINames();
     void testTarGzHugeMemoryUsage();
+    void testTarEndOfArchive();
     void testTarDeepDirHierarchy();
     void benchmarkTarDeepDirHierarchy();
 
@@ -95,8 +98,14 @@ private Q_SLOTS:
     void testZip64EndOfCentralDirectory();
     void testZip64DataDescriptor();
     void testZip64ExtraZip64Size();
+    void testZipUnicodePathChecks_data();
+    void testZipUnicodePathChecks();
     void testZip64ExtraZip64SizeFirst();
     void testZip64ExtraZip64Offset();
+    void testZipEntryNameEncoding_data();
+    void testZipEntryNameEncoding();
+    void testZipWritesUtf8Flag();
+    void testZipAppendKeepsStoredNames();
     void testZipOssFuzzIssue433303801();
     void testZipDeepDirHierarchy();
     void benchmarkZipDeepDirHierarchy();
@@ -145,6 +154,9 @@ private Q_SLOTS:
     void test7ZipFileNameEndsInSlash();
     void test7ZipOssFuzzIssues_data();
     void test7ZipOssFuzzIssues();
+    void test7ZipFolderItemRejectsInvalidCoderGraph_data();
+    void test7ZipFolderItemRejectsInvalidCoderGraph();
+    void test7ZipBcj2InputsNotDecoded();
 #if HAVE_OPENSSL_SUPPORT
     void test7ZipPasswordProtected();
 #endif

@@ -18,12 +18,18 @@
 #include <QFile>
 #include <QHash>
 #include <QList>
+#include <QLocale>
+#include <QStringDecoder>
 #include <QtEndian>
 #include <qplatformdefs.h>
 
 #include <string.h>
 #include <time.h>
 #include <zlib.h>
+
+#ifdef Q_OS_WIN
+#include <windows.h> // MultiByteToWideChar
+#endif
 
 #ifndef QT_STAT_LNK
 #define QT_STAT_LNK 0120000
@@ -88,6 +94,168 @@ static uint transformFromMsDos(const char *buffer)
     return dt.toSecsSinceEpoch();
 }
 
+// Code page 437 from 0x80 to 0xFF, the encoding of names without the UTF-8 flag in the zip specification
+/* clang-format off */
+static const char16_t s_cp437HighHalf[128] = {
+    0x00C7, 0x00FC, 0x00E9, 0x00E2, 0x00E4, 0x00E0, 0x00E5, 0x00E7, 0x00EA, 0x00EB, 0x00E8, 0x00EF, 0x00EE, 0x00EC, 0x00C4, 0x00C5,
+    0x00C9, 0x00E6, 0x00C6, 0x00F4, 0x00F6, 0x00F2, 0x00FB, 0x00F9, 0x00FF, 0x00D6, 0x00DC, 0x00A2, 0x00A3, 0x00A5, 0x20A7, 0x0192,
+    0x00E1, 0x00ED, 0x00F3, 0x00FA, 0x00F1, 0x00D1, 0x00AA, 0x00BA, 0x00BF, 0x2310, 0x00AC, 0x00BD, 0x00BC, 0x00A1, 0x00AB, 0x00BB,
+    0x2591, 0x2592, 0x2593, 0x2502, 0x2524, 0x2561, 0x2562, 0x2556, 0x2555, 0x2563, 0x2551, 0x2557, 0x255D, 0x255C, 0x255B, 0x2510,
+    0x2514, 0x2534, 0x252C, 0x251C, 0x2500, 0x253C, 0x255E, 0x255F, 0x255A, 0x2554, 0x2569, 0x2566, 0x2560, 0x2550, 0x256C, 0x2567,
+    0x2568, 0x2564, 0x2565, 0x2559, 0x2558, 0x2552, 0x2553, 0x256B, 0x256A, 0x2518, 0x250C, 0x2588, 0x2584, 0x258C, 0x2590, 0x2580,
+    0x03B1, 0x00DF, 0x0393, 0x03C0, 0x03A3, 0x03C3, 0x00B5, 0x03C4, 0x03A6, 0x0398, 0x03A9, 0x03B4, 0x221E, 0x03C6, 0x03B5, 0x2229,
+    0x2261, 0x00B1, 0x2265, 0x2264, 0x2320, 0x2321, 0x00F7, 0x2248, 0x00B0, 0x2219, 0x00B7, 0x221A, 0x207F, 0x00B2, 0x25A0, 0x00A0,
+};
+/* clang-format on */
+
+static QString decodeCp437(QByteArrayView name)
+{
+    QString decoded;
+    decoded.reserve(name.size());
+    for (const char c : name) {
+        const uchar byte = uchar(c);
+        decoded.append(QChar(byte < 0x80 ? char16_t(byte) : s_cp437HighHalf[byte - 0x80]));
+    }
+    return decoded;
+}
+
+#ifdef Q_OS_WIN
+// Decodes the name in the OEM code page of the system, as Windows Explorer does
+static bool decodeWindowsOem(QByteArrayView name, QString *decoded)
+{
+    const int length = MultiByteToWideChar(CP_OEMCP, MB_ERR_INVALID_CHARS, name.data(), int(name.size()), nullptr, 0);
+    if (length <= 0) {
+        return false;
+    }
+    decoded->resize(length);
+    return MultiByteToWideChar(CP_OEMCP, MB_ERR_INVALID_CHARS, name.data(), int(name.size()), reinterpret_cast<wchar_t *>(decoded->data()), length) == length;
+}
+#else
+/**
+ * Returns the OEM code page of Windows for the locale. Windows reads a name without the UTF-8 flag
+ * in this code page, and zip archivers on Windows write such names in it.
+ *
+ * The values come from the Windows culture data that .NET carries:
+ * https://github.com/dotnet/runtime/blob/6e51f762bc4c98ea90ae6ca21c4e220b4b2e7a5c/src/libraries/System.Private.CoreLib/src/System/Globalization/IcuLocaleData.cs#L2822
+ * Languages that are not listed use 850, as most Windows locales do.
+ */
+static int windowsOemCodePage(const QLocale &locale)
+{
+    // The C locale gets the default of the zip specification
+    if (locale.language() == QLocale::C) {
+        return 437;
+    }
+    if (locale.language() == QLocale::English) {
+        switch (locale.territory()) {
+        case QLocale::India:
+        case QLocale::Malaysia:
+        case QLocale::Philippines:
+        case QLocale::Singapore:
+        case QLocale::SouthAfrica:
+        case QLocale::UnitedStates:
+        case QLocale::Zimbabwe:
+            return 437;
+        default:
+            return 850;
+        }
+    }
+
+    struct LanguageCodePage {
+        const char *language; // ISO 639 code
+        const char *script; // ISO 15924 code, nullptr for any script
+        int codePage;
+    };
+    // A row with a script comes before the row for the whole language
+    /* clang-format off */
+    static const LanguageCodePage codePages[] = {
+        {"az", "Cyrl", 866}, {"bs", "Cyrl", 855}, {"pa", "Arab", 720}, {"sr", "Cyrl", 855}, {"tzm", "Arab", 720}, {"uz", "Cyrl", 866}, {"zh", "Hant", 950},
+        {"ar", nullptr, 720}, {"az", nullptr, 857}, {"ba", nullptr, 866}, {"be", nullptr, 866}, {"bg", nullptr, 866}, {"bs", nullptr, 852},
+        {"ckb", nullptr, 720}, {"cs", nullptr, 852}, {"el", nullptr, 737}, {"et", nullptr, 775}, {"fa", nullptr, 720}, {"fil", nullptr, 437},
+        {"ha", nullptr, 437}, {"haw", nullptr, 437}, {"he", nullptr, 862}, {"hr", nullptr, 852}, {"hu", nullptr, 852}, {"ig", nullptr, 437},
+        {"iu", nullptr, 437}, {"ja", nullptr, 932}, {"ko", nullptr, 949}, {"ky", nullptr, 866}, {"la", nullptr, 437}, {"lt", nullptr, 775},
+        {"lv", nullptr, 775}, {"mk", nullptr, 866}, {"mn", nullptr, 866}, {"pl", nullptr, 852}, {"ro", nullptr, 852}, {"ru", nullptr, 866},
+        {"rw", nullptr, 437}, {"sah", nullptr, 866}, {"sd", nullptr, 720}, {"sk", nullptr, 852}, {"sl", nullptr, 852}, {"sq", nullptr, 852},
+        {"sr", nullptr, 852}, {"sw", nullptr, 437}, {"tg", nullptr, 866}, {"th", nullptr, 874}, {"tk", nullptr, 852}, {"tr", nullptr, 857},
+        {"tt", nullptr, 866}, {"ug", nullptr, 720}, {"uk", nullptr, 866}, {"ur", nullptr, 720}, {"uz", nullptr, 857}, {"vi", nullptr, 1258},
+        {"yo", nullptr, 437}, {"zh", nullptr, 936},
+    };
+    /* clang-format on */
+
+    const QString language = QLocale::languageToCode(locale.language());
+    const QString script = QLocale::scriptToCode(locale.script());
+    for (const LanguageCodePage &entry : codePages) {
+        if (language == QLatin1StringView(entry.language) && (!entry.script || script == QLatin1StringView(entry.script))) {
+            return entry.codePage;
+        }
+    }
+    return 850;
+}
+#endif
+
+/**
+ * Decodes the name of an entry.
+ *
+ * Bit 11 of the general purpose flag marks a name in UTF-8. Other names are read as UTF-8 when they
+ * are valid UTF-8, which is what KZip writes, and otherwise in the Windows OEM code page: the one
+ * of the system on Windows, the one of the locale elsewhere. Code page 437, the default of the zip
+ * specification, is the fallback when no decoder can read the name.
+ */
+class EntryNameDecoder
+{
+public:
+    QString decode(QByteArrayView name, quint16 generalPurposeFlag)
+    {
+        if (generalPurposeFlag & 0x0800) {
+            return QString::fromUtf8(name);
+        }
+
+        if (name.isValidUtf8()) {
+            return QString::fromUtf8(name);
+        }
+
+#ifdef Q_OS_WIN
+        QString oemDecoded;
+        if (decodeWindowsOem(name, &oemDecoded)) {
+            return oemDecoded;
+        }
+#else
+        if (!m_oemDecoderCreated) {
+            m_oemDecoderCreated = true;
+            const int codePage = windowsOemCodePage(QLocale());
+            if (codePage != 437) {
+                const QByteArray codePageName = "windows-" + QByteArray::number(codePage);
+                m_oemDecoder = QStringDecoder(codePageName.constData(), QStringDecoder::Flag::Stateless);
+            }
+        }
+        if (m_oemDecoder.isValid()) {
+            const QString oemDecoded = m_oemDecoder(name);
+            if (!m_oemDecoder.hasError()) {
+                return oemDecoded;
+            }
+            m_oemDecoder.resetState();
+        }
+#endif
+        return decodeCp437(name);
+    }
+
+#ifndef Q_OS_WIN
+private:
+    bool m_oemDecoderCreated = false;
+    QStringDecoder m_oemDecoder;
+#endif
+};
+
+// Names are written in UTF-8. Bit 11 of the general purpose flag marks them, unless they are ASCII.
+static quint16 entryNameFlag(QByteArrayView encodedName)
+{
+    for (const char c : encodedName) {
+        if (uchar(c) >= 0x80) {
+            return 0x0800;
+        }
+    }
+    return 0;
+}
+
 // == parsing routines for zip headers
 
 /** all relevant information about parsing file information */
@@ -115,6 +283,11 @@ struct ParseFileInfo {
     // position of the Local File Header itself, or from the
     // ZIP64 extra field in the Central Directory
     quint64 localheaderoffset = 0;
+
+    // Info-ZIP Unicode Path extra field: the CRC-32 of the stored name it replaces, and the name in UTF-8
+    bool unicodePathSeen = false;
+    uint unicodePathCrc = 0;
+    QByteArray unicodePath;
 
     ParseFileInfo()
         : perm(0100644)
@@ -257,9 +430,16 @@ static bool parseInfoZipUnixNew(const char *buffer, int size, bool islocal,
  * @param uncompressedSize32 quint32 32-bit value for uncompressed size
  * @param compressedSize32 quint32 32-bit value for compressed size
  * @param localHeaderOffset32 quint32 32-bit value for local header offset
+ * @param isLocal true for the extra field of a local header, false for the central directory
  * @return true if parsing was successful
  */
-static bool parseExtraField(const char *buffer, int size, ParseFileInfo &pfi, quint32 uncompressedSize32, quint32 compressedSize32, quint32 localHeaderOffset32)
+static bool parseExtraField(const char *buffer,
+                            int size,
+                            ParseFileInfo &pfi,
+                            quint32 uncompressedSize32,
+                            quint32 compressedSize32,
+                            quint32 localHeaderOffset32,
+                            bool isLocal)
 {
     while (size >= 4) { // as long as a potential extra field can be read
         int magic = parseUi16(buffer);
@@ -299,6 +479,13 @@ static bool parseExtraField(const char *buffer, int size, ParseFileInfo &pfi, qu
         case 0x5855: // old Info-ZIP unix extra field
             if (!parseInfoZipUnixOld(buffer, fieldsize, true, pfi)) {
                 return false;
+            }
+            break;
+        case 0x7075: // Info-ZIP Unicode Path, version 1, only read from the central directory
+            if (!isLocal && fieldsize > 5 && buffer[0] == 1 && QByteArrayView(buffer + 5, fieldsize - 5).isValidUtf8()) {
+                pfi.unicodePathSeen = true;
+                pfi.unicodePathCrc = parseUi32(buffer + 1);
+                pfi.unicodePath = QByteArray(buffer + 5, fieldsize - 5);
             }
             break;
 #if 0 // not needed yet
@@ -441,6 +628,17 @@ public:
     quint64 m_offset;
     // Position of the first Local File Header
     quint64 m_startPos = 0;
+
+    // Name of an entry read from the archive, as stored. The local header of the entry keeps it in
+    // append mode, so the central directory written on close uses it too.
+    struct StoredName {
+        QByteArray name;
+        quint16 utf8Flag;
+        // UTF-8 path and CRC-32 of a valid Unicode Path field, the path is empty when there was none
+        QByteArray unicodePath;
+        uint unicodePathCrc;
+    };
+    QHash<const KZipFileEntry *, StoredName> m_storedNames;
 };
 
 KZip::KZip(const QString &fileName)
@@ -468,6 +666,7 @@ bool KZip::openArchive(QIODevice::OpenMode mode)
 {
     // qCDebug(KArchiveLog);
     d->m_fileList.clear();
+    d->m_storedNames.clear();
 
     if (mode == QIODevice::WriteOnly) {
         return true;
@@ -487,6 +686,8 @@ bool KZip::openArchive(QIODevice::OpenMode mode)
     bool startOfFile = true;
 
     qint64 expectedStartPos = 0;
+
+    EntryNameDecoder entryNameDecoder;
 
     for (;;) { // repeat until 'end of entries' signature is reached
         // qCDebug(KArchiveLog) << "loop starts";
@@ -567,7 +768,7 @@ bool KZip::openArchive(QIODevice::OpenMode mode)
 
             n = dev->read(buffer, handledextralen);
             // no error msg necessary as we deliberately truncate the extra field
-            if (!parseExtraField(buffer, n, pfi, uncomp_size, compr_size, 0)) {
+            if (!parseExtraField(buffer, n, pfi, uncomp_size, compr_size, 0, true)) {
                 setErrorString(tr("Invalid ZIP File. Broken ExtraField."));
                 return false;
             }
@@ -682,8 +883,7 @@ bool KZip::openArchive(QIODevice::OpenMode mode)
             const int commlen = parseUi16(buffer + 32);
             // compression method of this file
             const int cmethod = parseUi16(buffer + 10);
-            // int gpf =  parseUi16(buffer + 8);
-            // qCDebug(KArchiveLog) << "general purpose flag=" << gpf;
+            const quint16 gpf = parseUi16(buffer + 8);
             // length of the fileName (well, pathname indeed)
             const int namelen = parseUi16(buffer + 28);
             if (namelen <= 0) {
@@ -709,7 +909,11 @@ bool KZip::openArchive(QIODevice::OpenMode mode)
 
             ParseFileInfo extrafi;
             if (extralen) {
-                parseExtraField(varData.constData() + namelen, extralen, extrafi, ucsize32, csize32, localheaderoffset_32);
+                parseExtraField(varData.constData() + namelen, extralen, extrafi, ucsize32, csize32, localheaderoffset_32, false);
+            }
+            // A Unicode Path that would turn a folder into a file, or a file into a folder, is ignored
+            if (extrafi.unicodePathSeen && extrafi.unicodePath.endsWith('/') != (varData.at(namelen - 1) == '/')) {
+                extrafi.unicodePathSeen = false;
             }
 
             // uncompressed file size
@@ -723,7 +927,15 @@ bool KZip::openArchive(QIODevice::OpenMode mode)
 
             ParseFileInfo pfi = pfi_map.value(bufferName, ParseFileInfo());
 
-            QString name(QFile::decodeName(bufferName));
+            // The Unicode Path field is ignored when the name changed after it was written
+            QString name;
+            const bool unicodePathMatches =
+                extrafi.unicodePathSeen && extrafi.unicodePathCrc == ::crc32(0, reinterpret_cast<const Bytef *>(bufferName.constData()), bufferName.size());
+            if (unicodePathMatches) {
+                name = QString::fromUtf8(extrafi.unicodePath);
+            } else {
+                name = entryNameDecoder.decode(bufferName, gpf);
+            }
 
             // qCDebug(KArchiveLog) << "name: " << name;
             // qCDebug(KArchiveLog) << "cmethod: " << cmethod;
@@ -800,6 +1012,11 @@ bool KZip::openArchive(QIODevice::OpenMode mode)
                 static_cast<KZipFileEntry *>(entry)->setCRC32(crc32);
                 // qCDebug(KArchiveLog) << "KZipFileEntry created, entryName= " << entryName << ", name=" << name;
                 d->m_fileList.append(static_cast<KZipFileEntry *>(entry));
+                d->m_storedNames.insert(static_cast<KZipFileEntry *>(entry),
+                                        {bufferName,
+                                         quint16(gpf & 0x0800),
+                                         unicodePathMatches ? extrafi.unicodePath : QByteArray(),
+                                         unicodePathMatches ? extrafi.unicodePathCrc : 0});
             }
 
             if (entry) {
@@ -892,7 +1109,8 @@ bool KZip::closeArchive()
         //    << entry->path()
         //    << "encoding:" << entry->encoding();
 
-        QByteArray path = QFile::encodeName(entry->path());
+        const auto storedName = d->m_storedNames.constFind(entry);
+        const QByteArray path = storedName != d->m_storedNames.cend() ? storedName->name : entry->path().toUtf8();
         uLong mycrc = entry->crc32();
         qint64 compressedSize = entry->compressedSize();
         qint64 size = entry->size();
@@ -953,7 +1171,10 @@ bool KZip::closeArchive()
         // qCDebug(KArchiveLog) << "fileName:" << entry->path()
         //              << "encoding:" << entry->encoding();
 
-        QByteArray path = QFile::encodeName(entry->path());
+        const auto storedName = d->m_storedNames.constFind(entry);
+        const bool isStored = storedName != d->m_storedNames.cend();
+        const QByteArray path = isStored ? storedName->name : entry->path().toUtf8();
+        const QByteArray unicodePath = isStored ? storedName->unicodePath : QByteArray();
         qint64 compressedSize = entry->compressedSize();
         qint64 size = entry->size();
         qint64 myhst = entry->headerStart();
@@ -971,6 +1192,10 @@ bool KZip::closeArchive()
             zip64FieldSize = 28;
         }
         extra_field_len += zip64FieldSize;
+        if (!unicodePath.isEmpty()) {
+            // 2 header id + 2 field size + 1 version + 4 crc32 + path
+            extra_field_len += 9 + unicodePath.size();
+        }
 
         const int bufferSize = extra_field_len + path.length() + 46;
         char *buffer = new char[bufferSize];
@@ -991,7 +1216,7 @@ bool KZip::closeArchive()
         buffer[7] = 0;
 
         // General purpose bit flag
-        // qToLittleEndian<quint16>(0, buffer + 8);
+        qToLittleEndian<quint16>(isStored ? storedName->utf8Flag : entryNameFlag(path), buffer + 8);
 
         // compression method
         qToLittleEndian<quint16>(char(entry->encoding()), buffer + 10);
@@ -1079,6 +1304,17 @@ bool KZip::closeArchive()
 
             // number of the disk on which this file starts
             // qToLittleEndian<quint32>(0, extfield + 28);
+            extfield += zip64FieldSize;
+        }
+
+        if (!unicodePath.isEmpty()) {
+            // Info-ZIP Unicode Path header (0x7075)
+            extfield[0] = 0x75;
+            extfield[1] = 0x70;
+            qToLittleEndian<quint16>(5 + unicodePath.size(), extfield + 2);
+            extfield[4] = 1; // version
+            qToLittleEndian<quint32>(storedName->unicodePathCrc, extfield + 5);
+            memcpy(extfield + 9, unicodePath.constData(), unicodePath.size());
         }
 
         crc = crc32(crc, (Bytef *)buffer, bufferSize);
@@ -1295,6 +1531,7 @@ bool KZip::doPrepareWriting(const QString &name,
                 return false;
             }
             // qCDebug(KArchiveLog) << "removing following entry: " << entry->path();
+            d->m_storedNames.remove(*it);
             delete *it;
             it = d->m_fileList.erase(it);
         } else {
@@ -1315,7 +1552,7 @@ bool KZip::doPrepareWriting(const QString &name,
         extra_field_len += 20;
     }
 
-    QByteArray encodedName = QFile::encodeName(name);
+    const QByteArray encodedName = name.toUtf8();
 
     // construct a KZipFileEntry and add it to list
     KZipFileEntry *e = new KZipFileEntry(this,
@@ -1353,7 +1590,7 @@ bool KZip::doPrepareWriting(const QString &name,
     qToLittleEndian<quint16>(isZip64Archive ? 45 : 0x14, buffer + 4);
 
     // general purpose bit flag
-    qToLittleEndian<quint16>(0, buffer + 6);
+    qToLittleEndian<quint16>(entryNameFlag(encodedName), buffer + 6);
 
     // compression method
     qToLittleEndian<quint16>(char(e->encoding()), buffer + 8);
@@ -1458,7 +1695,7 @@ bool KZip::doFinishWriting(qint64 size)
     // qCDebug(KArchiveLog) << "getpos (at): " << device()->pos();
     d->m_currentFile->setSize(size);
 
-    const QByteArray encodedName = QFile::encodeName(d->m_currentFile->path());
+    const QByteArray encodedName = d->m_currentFile->path().toUtf8();
     qint64 csize = device()->pos() - d->m_currentFile->position();
     d->m_currentFile->setCompressedSize(csize);
     // qCDebug(KArchiveLog) << "usize: " << d->m_currentFile->size();

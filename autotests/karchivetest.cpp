@@ -21,9 +21,12 @@
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QScopeGuard>
 #include <QStandardPaths>
+#include <QStringDecoder>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QtEndian>
 #include <kcompressiondevice.h>
 
 #ifndef Q_OS_WIN
@@ -400,6 +403,106 @@ void KArchiveTest::testNonExistentFile()
     KTar tar(QStringLiteral("nonexistent.tar.gz"));
     QVERIFY(!tar.open(QIODevice::ReadOnly));
     QCOMPARE(tar.errorString(), tr("File %1 does not exist").arg("nonexistent.tar.gz"));
+}
+
+void KArchiveTest::testCreateTarNoMimetype_data()
+{
+    QTest::addColumn<QString>("fileName");
+
+    /* clang-format off */
+    QTest::addRow("gz")   << QFINDTESTDATA("data/tar_mimetype_determination/test.tar.gz");
+
+#if HAVE_BZIP2_SUPPORT
+    QTest::addRow("bz2")  << QFINDTESTDATA("data/tar_mimetype_determination/test.tar.bz2");
+
+    //renamed archives
+    QTest::addRow("gz_to_bz2")   << QFINDTESTDATA("data/tar_mimetype_determination/test_gz_to_bz2.tar.bz2");
+    QTest::addRow("bz2_to_gz")   << QFINDTESTDATA("data/tar_mimetype_determination/test_bz2_to_gz.tar.gz");
+
+    #if HAVE_XZ_SUPPORT
+        QTest::addRow("bz2_to_xz")   << QFINDTESTDATA("data/tar_mimetype_determination/test_bz2_to_xz.tar.xz");
+        QTest::addRow("bz2_to_lz")   << QFINDTESTDATA("data/tar_mimetype_determination/test_bz2_to_lz.tar.lz");
+        QTest::addRow("bz2_to_lzma") << QFINDTESTDATA("data/tar_mimetype_determination/test_bz2_to_lzma.tar.lzma");
+    #else
+        qDebug() << "Skipped testing BZip to XZ/LZ/LZMA renamed archives: Built without XZ support";
+    #endif
+
+    #if HAVE_ZSTD_SUPPORT
+        QTest::addRow("bz2_to_zst")  << QFINDTESTDATA("data/tar_mimetype_determination/test_bz2_to_zst.tar.zst");
+    #else
+        qDebug() << "Skipped testing BZip to ZST renamed archive: Built without ZSTD support";
+    #endif
+#else
+    qDebug() << "Skipped testing BZip: Built without BZip support";
+#endif
+
+#if HAVE_XZ_SUPPORT
+    QTest::addRow("xz")   << QFINDTESTDATA("data/tar_mimetype_determination/test.tar.xz");
+    QTest::addRow("lz")   << QFINDTESTDATA("data/tar_mimetype_determination/test.tar.lz");
+    QTest::addRow("lzma") << QFINDTESTDATA("data/tar_mimetype_determination/test.tar.lzma");
+
+    //renamed archives
+    QTest::addRow("gz_to_xz")    << QFINDTESTDATA("data/tar_mimetype_determination/test_gz_to_xz.tar.xz");
+    QTest::addRow("gz_to_lz")    << QFINDTESTDATA("data/tar_mimetype_determination/test_gz_to_lz.tar.lz");
+    QTest::addRow("gz_to_lzma")  << QFINDTESTDATA("data/tar_mimetype_determination/test_gz_to_lzma.tar.lzma");
+    QTest::addRow("xz_to_gz")    << QFINDTESTDATA("data/tar_mimetype_determination/test_xz_to_gz.tar.gz");
+    QTest::addRow("lz_to_gz")    << QFINDTESTDATA("data/tar_mimetype_determination/test_lz_to_gz.tar.gz");
+    QTest::addRow("xz_to_lz")    << QFINDTESTDATA("data/tar_mimetype_determination/test_xz_to_lz.tar.lz");
+    QTest::addRow("xz_to_lzma")  << QFINDTESTDATA("data/tar_mimetype_determination/test_xz_to_lzma.tar.lzma");
+    QTest::addRow("lz_to_xz")    << QFINDTESTDATA("data/tar_mimetype_determination/test_lz_to_xz.tar.xz");
+    QTest::addRow("lz_to_lzma")  << QFINDTESTDATA("data/tar_mimetype_determination/test_lz_to_lzma.tar.lzma");
+
+    #if HAVE_BZIP2_SUPPORT
+        QTest::addRow("xz_to_bz2")   << QFINDTESTDATA("data/tar_mimetype_determination/test_xz_to_bz2.tar.bz2");
+        QTest::addRow("lz_to_bz2")   << QFINDTESTDATA("data/tar_mimetype_determination/test_lz_to_bz2.tar.bz2");
+    #else
+        qDebug() << "Skipped testing XZ/LZ/LZMA to BZip renamed archives: Built without BZip support";
+    #endif
+    
+    #if HAVE_ZSTD_SUPPORT
+        QTest::addRow("xz_to_zst")   << QFINDTESTDATA("data/tar_mimetype_determination/test_xz_to_zst.tar.zst");
+        QTest::addRow("lz_to_zst")   << QFINDTESTDATA("data/tar_mimetype_determination/test_lz_to_zst.tar.zst");
+    #else
+        qDebug() << "Skipped testing XZ/LZ/LZMA to ZST renamed archives: Built without ZSTD support";
+    #endif
+
+#else
+    qDebug() << "Skipped testing XZ/LZ/LZMA archives: Built without XZ support";
+#endif
+
+#if HAVE_ZSTD_SUPPORT
+    QTest::addRow("zst")  << QFINDTESTDATA("data/tar_mimetype_determination/test.tar.zst");
+
+    //renamed archives
+    QTest::addRow("gz_to_zst")   << QFINDTESTDATA("data/tar_mimetype_determination/test_gz_to_zst.tar.zst");
+    QTest::addRow("zst_to_gz")   << QFINDTESTDATA("data/tar_mimetype_determination/test_zst_to_gz.tar.gz");
+    
+    #if HAVE_BZIP2_SUPPORT
+        QTest::addRow("zst_to_bz2")  << QFINDTESTDATA("data/tar_mimetype_determination/test_zst_to_bz2.tar.bz2");
+    #else
+        qDebug() << "Skipped testing ZST to BZip renamed archive: Built without BZip support";
+    #endif
+    
+    #if HAVE_XZ_SUPPORT
+        QTest::addRow("zst_to_xz")   << QFINDTESTDATA("data/tar_mimetype_determination/test_zst_to_xz.tar.xz");
+        QTest::addRow("zst_to_lz")   << QFINDTESTDATA("data/tar_mimetype_determination/test_zst_to_lz.tar.lz");
+        QTest::addRow("zst_to_lzma") << QFINDTESTDATA("data/tar_mimetype_determination/test_zst_to_lzma.tar.lzma");
+    #else
+        qDebug() << "Skipped testing ZST to XZ/LZ/LZMA archives: Built without XZ support";
+    #endif
+#else
+    qDebug() << "Skipped testing ZST archives: Built without ZSTD support";
+#endif
+}
+
+void KArchiveTest::testCreateTarNoMimetype()
+{
+    QFETCH(QString, fileName);
+
+    KTar tar(fileName);
+
+    QVERIFY(tar.open(QIODevice::ReadOnly));
+    QVERIFY2(tar.directory()->entries().size() > 0, "Tar has no entries. Mimetype was determined wrongly");
 }
 
 void KArchiveTest::testCreateTar_data()
@@ -923,6 +1026,65 @@ void KArchiveTest::testTarGzHugeMemoryUsage()
     QVERIFY(!tar.open(QIODevice::ReadOnly));
 }
 
+// Each small file takes a header and a data record, plus two zero-filled
+// records at the end of the archive
+static bool hasEndOfArchive(const QByteArray &data, int files)
+{
+    return data.size() == (2 * files + 2) * 0x200 && data.endsWith(QByteArray(2 * 0x200, '\0'));
+}
+
+static QByteArray readAll(QIODevice &&dev)
+{
+    if (!dev.open(QIODevice::ReadOnly)) {
+        return QByteArray();
+    }
+    return dev.readAll();
+}
+
+void KArchiveTest::testTarEndOfArchive()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    const QString fileName = dir.filePath(QStringLiteral("endofarchive.tar"));
+    {
+        KTar tar(fileName);
+        QVERIFY(tar.open(QIODevice::WriteOnly));
+        QVERIFY(tar.writeFile(QStringLiteral("first.txt"), QByteArray("first")));
+        QVERIFY(tar.close());
+    }
+    QVERIFY(hasEndOfArchive(readAll(QFile(fileName)), 1));
+
+    // Appending must replace the end of archive marker, not write behind it
+    {
+        KTar tar(fileName);
+        QVERIFY(tar.open(QIODevice::ReadWrite));
+        QVERIFY(tar.writeFile(QStringLiteral("second.txt"), QByteArray("second")));
+        QVERIFY(tar.close());
+    }
+    QVERIFY(hasEndOfArchive(readAll(QFile(fileName)), 2));
+    {
+        KTar tar(fileName);
+        QVERIFY(tar.open(QIODevice::ReadOnly));
+        const KArchiveFile *first = tar.directory()->file(QStringLiteral("first.txt"));
+        const KArchiveFile *second = tar.directory()->file(QStringLiteral("second.txt"));
+        QVERIFY(first);
+        QVERIFY(second);
+        QCOMPARE(first->data(), QByteArray("first"));
+        QCOMPARE(second->data(), QByteArray("second"));
+    }
+
+    // Compressed archives are written to a temporary file first
+    const QString gzFileName = dir.filePath(QStringLiteral("endofarchive.tar.gz"));
+    {
+        KTar tar(gzFileName);
+        QVERIFY(tar.open(QIODevice::WriteOnly));
+        QVERIFY(tar.writeFile(QStringLiteral("first.txt"), QByteArray("first")));
+        QVERIFY(tar.close());
+    }
+    QVERIFY(hasEndOfArchive(readAll(KCompressionDevice(gzFileName, KCompressionDevice::GZip)), 1));
+}
+
 void KArchiveTest::testTarIgnoreRelativePathOutsideArchive()
 {
 #if HAVE_BZIP2_SUPPORT
@@ -1172,7 +1334,6 @@ void KArchiveTest::testZipWithNonLatinFileNames()
 
     const QByteArray fileData("Test of data with a russian file name");
     const QString fileName = QString::fromUtf8("Архитектура.okular");
-    const QString recodedFileName = QFile::decodeName(QFile::encodeName(fileName));
     QVERIFY(zip.writeFile(fileName, fileData));
 
     QVERIFY(zip.close());
@@ -1184,7 +1345,7 @@ void KArchiveTest::testZipWithNonLatinFileNames()
     const QStringList listing = recursiveListEntries(dir, QLatin1String(""), 0);
 
     QCOMPARE(listing.count(), 1);
-    QCOMPARE(listing[0], QString::fromUtf8("mode=100644 path=%1 type=file size=%2").arg(recodedFileName).arg(fileData.size()));
+    QCOMPARE(listing[0], QString::fromUtf8("mode=100644 path=%1 type=file size=%2").arg(fileName).arg(fileData.size()));
 
     const KArchiveFile *fileEntry = static_cast<const KArchiveFile *>(dir->entry(dir->entries()[0]));
     QCOMPARE(fileEntry->data(), fileData);
@@ -1606,6 +1767,253 @@ void KArchiveTest::testZip64ExtraZip64Offset()
     QCOMPARE(data.sliced(0, 6), "<?xml ");
 
     QVERIFY(zip.close());
+}
+
+// Returns a zip archive that holds one empty file, with the given name bytes, flag and extra field
+static QByteArray zipWithOneEntry(const QByteArray &name, quint16 generalPurposeFlag, const QByteArray &extraField = QByteArray())
+{
+    const auto appendUi16 = [](QByteArray &data, quint16 value) {
+        data.append(char(value & 0xff)).append(char(value >> 8));
+    };
+    const auto appendUi32 = [&appendUi16](QByteArray &data, quint32 value) {
+        appendUi16(data, value & 0xffff);
+        appendUi16(data, value >> 16);
+    };
+    const auto appendCommonFields = [&](QByteArray &data) {
+        appendUi16(data, 20); // version needed to extract
+        appendUi16(data, generalPurposeFlag);
+        appendUi16(data, 0); // stored
+        appendUi16(data, 0); // time
+        appendUi16(data, 0x0021); // date, 1980-01-01
+        appendUi32(data, 0); // crc32
+        appendUi32(data, 0); // compressed size
+        appendUi32(data, 0); // uncompressed size
+        appendUi16(data, name.size());
+        appendUi16(data, extraField.size());
+    };
+
+    QByteArray zip("PK\x03\x04");
+    appendCommonFields(zip);
+    zip += name + extraField;
+
+    const qsizetype centralDirectoryOffset = zip.size();
+    zip += "PK\x01\x02";
+    appendUi16(zip, 20); // version made by, MS-DOS
+    appendCommonFields(zip);
+    appendUi16(zip, 0); // comment length
+    appendUi16(zip, 0); // disk number
+    appendUi16(zip, 0); // internal attributes
+    appendUi32(zip, 0); // external attributes
+    appendUi32(zip, 0); // offset of the local header
+    zip += name + extraField;
+    const qsizetype centralDirectorySize = zip.size() - centralDirectoryOffset;
+
+    zip += "PK\x05\x06";
+    appendUi16(zip, 0); // disk number
+    appendUi16(zip, 0); // disk of the central directory
+    appendUi16(zip, 1); // entries on this disk
+    appendUi16(zip, 1); // entries
+    appendUi32(zip, centralDirectorySize);
+    appendUi32(zip, centralDirectoryOffset);
+    appendUi16(zip, 0); // comment length
+    return zip;
+}
+
+// Returns an Info-ZIP Unicode Path extra field that gives path for the stored name with the given CRC-32
+static QByteArray unicodePathField(const QByteArray &path, quint32 crc)
+{
+    QByteArray field("\x75\x70");
+    const quint16 size = 5 + path.size();
+    field.append(char(size & 0xff)).append(char(size >> 8));
+    field.append(char(1)); // version
+    for (int shift = 0; shift < 32; shift += 8) {
+        field.append(char((crc >> shift) & 0xff));
+    }
+    return field + path;
+}
+
+void KArchiveTest::testZipUnicodePathChecks_data()
+{
+    QTest::addColumn<QByteArray>("name");
+    QTest::addColumn<QByteArray>("extraField");
+    QTest::addColumn<QString>("expectedName");
+
+    const QByteArray cp866Name("\x8e\xe2\xa2\xa5\xe2\xeb.txt");
+    const quint32 cp866NameCrc = 0x556ef68c; // CRC-32 of cp866Name
+    const QString cp437Name = QStringLiteral("ÄΓóÑΓδ.txt");
+    QTest::addRow("empty path") << cp866Name << unicodePathField(QByteArray(), cp866NameCrc) << cp437Name;
+    QTest::addRow("invalid utf-8") << cp866Name << unicodePathField(QByteArray("\xff.txt"), cp866NameCrc) << cp437Name;
+
+    const QByteArray cp866Folder("\xaf\xa0\xaf\xaa\xa0/");
+    const quint32 cp866FolderCrc = 0xed9ecd5b; // CRC-32 of cp866Folder
+    QTest::addRow("folder without a slash") << cp866Folder << unicodePathField(QStringLiteral("папка").toUtf8(), cp866FolderCrc) << QStringLiteral("»á»¬á");
+}
+
+void KArchiveTest::testZipUnicodePathChecks()
+{
+    QFETCH(QByteArray, name);
+    QFETCH(QByteArray, extraField);
+    QFETCH(QString, expectedName);
+
+    // The stored names are then read as code page 437
+    const QLocale defaultLocale;
+    QLocale::setDefault(QLocale(QLocale::English, QLocale::UnitedStates));
+    const auto restoreLocale = qScopeGuard([&defaultLocale] {
+        QLocale::setDefault(defaultLocale);
+    });
+#ifdef Q_OS_WIN
+    if (GetOEMCP() != 437) {
+        QSKIP("Windows reads these names in the OEM code page of the system");
+    }
+#endif
+
+    QByteArray zipData = zipWithOneEntry(name, 0, extraField);
+    QBuffer zipBuffer(&zipData);
+    KZip zip(&zipBuffer);
+    QVERIFY2(zip.open(QIODevice::ReadOnly), qPrintable(zip.errorString()));
+    QCOMPARE(zip.directory()->entries(), QStringList{expectedName});
+}
+
+void KArchiveTest::testZipEntryNameEncoding_data()
+{
+    QTest::addColumn<QByteArray>("name");
+    QTest::addColumn<quint16>("generalPurposeFlag");
+    QTest::addColumn<QByteArray>("extraField");
+    QTest::addColumn<QString>("expectedName");
+    QTest::addColumn<QString>("locale");
+
+    const QString russianName = QStringLiteral("Ответы.txt");
+    const QByteArray cp866Name("\x8e\xe2\xa2\xa5\xe2\xeb.txt");
+
+    QTest::addRow("utf-8 flag") << russianName.toUtf8() << quint16(0x0800) << QByteArray() << russianName << QStringLiteral("en_US");
+    QTest::addRow("utf-8 without flag") << russianName.toUtf8() << quint16(0) << QByteArray() << russianName << QStringLiteral("en_US");
+    QTest::addRow("cp437") << QByteArray("caf\x82.txt") << quint16(0) << QByteArray() << QStringLiteral("café.txt") << QStringLiteral("en_US");
+    QTest::addRow("cp866 read as cp437") << cp866Name << quint16(0) << QByteArray() << QStringLiteral("ÄΓóÑΓδ.txt") << QStringLiteral("en_US");
+
+    QTest::addRow("cp866 in a Russian locale") << cp866Name << quint16(0) << QByteArray() << russianName << QStringLiteral("ru_RU");
+    QTest::addRow("cp866 in an Azerbaijani Cyrillic locale") << cp866Name << quint16(0) << QByteArray() << russianName << QStringLiteral("az_Cyrl_AZ");
+    QTest::addRow("cp866 read as cp857 in an Azerbaijani Latin locale")
+        << cp866Name << quint16(0) << QByteArray() << QStringLiteral("ÄÔóÑÔÙ.txt") << QStringLiteral("az_Latn_AZ");
+    const QByteArray cp850Name("sm\x9b" "rbr\x9b" "d.txt");
+    QTest::addRow("cp850 in a British English locale") << cp850Name << quint16(0) << QByteArray() << QStringLiteral("smørbrød.txt") << QStringLiteral("en_GB");
+    QTest::addRow("cp850 read as cp437 in a US English locale")
+        << cp850Name << quint16(0) << QByteArray() << QStringLiteral("sm¢rbr¢d.txt") << QStringLiteral("en_US");
+    QTest::addRow("cp850 read as cp437 in an Indian English locale")
+        << cp850Name << quint16(0) << QByteArray() << QStringLiteral("sm¢rbr¢d.txt") << QStringLiteral("en_IN");
+    QTest::addRow("cp850 read as cp437 in the C locale") << cp850Name << quint16(0) << QByteArray() << QStringLiteral("sm¢rbr¢d.txt") << QStringLiteral("C");
+    QTest::addRow("cp932 in a Japanese locale") << QByteArray("\x83\x65\x83\x58\x83\x67.txt") << quint16(0) << QByteArray() << QStringLiteral("テスト.txt")
+                                                << QStringLiteral("ja_JP");
+
+    const quint32 cp866NameCrc = 0x556ef68c; // CRC-32 of cp866Name
+    QTest::addRow("unicode path field") << cp866Name << quint16(0) << unicodePathField(russianName.toUtf8(), cp866NameCrc) << russianName << QStringLiteral("en_US");
+    QTest::addRow("unicode path field for another name") << cp866Name << quint16(0) << unicodePathField(russianName.toUtf8(), cp866NameCrc + 1) << QStringLiteral("ÄΓóÑΓδ.txt") << QStringLiteral("en_US");
+}
+
+void KArchiveTest::testZipEntryNameEncoding()
+{
+    QFETCH(QByteArray, name);
+    QFETCH(quint16, generalPurposeFlag);
+    QFETCH(QByteArray, extraField);
+    QFETCH(QString, expectedName);
+    QFETCH(QString, locale);
+
+    const QLocale defaultLocale;
+    QLocale::setDefault(QLocale(locale));
+    const auto restoreLocale = qScopeGuard([&defaultLocale] {
+        QLocale::setDefault(defaultLocale);
+    });
+    const bool codePage437Locale = locale == u"en_US" || locale == u"en_IN" || locale == u"C";
+#ifdef Q_OS_WIN
+    if (!name.isValidUtf8() && (!codePage437Locale || GetOEMCP() != 437)) {
+        QSKIP("Windows reads these names in the OEM code page of the system");
+    }
+#else
+    if (!codePage437Locale && !QStringDecoder("windows-866").isValid()) {
+        QSKIP("Qt has no decoder for the Windows OEM code pages");
+    }
+#endif
+
+    QByteArray zipData = zipWithOneEntry(name, generalPurposeFlag, extraField);
+    QBuffer zipBuffer(&zipData);
+    KZip zip(&zipBuffer);
+    QVERIFY2(zip.open(QIODevice::ReadOnly), qPrintable(zip.errorString()));
+
+    QCOMPARE(zip.directory()->entries(), QStringList{expectedName});
+    QVERIFY(zip.directory()->file(expectedName));
+}
+
+void KArchiveTest::testZipWritesUtf8Flag()
+{
+    const QString russianName = QStringLiteral("Ответы.txt");
+    const QString asciiName = QStringLiteral("plain.txt");
+
+    QByteArray zipData;
+    {
+        QBuffer zipBuffer(&zipData);
+        KZip zip(&zipBuffer);
+        QVERIFY(zip.open(QIODevice::WriteOnly));
+        QVERIFY(zip.writeFile(russianName, "data"));
+        QVERIFY(zip.writeFile(asciiName, "data"));
+        QVERIFY(zip.close());
+    }
+
+    // The general purpose flag is at offset 6 of a local header and at offset 8 of a central directory header
+    QHash<QByteArray, quint16> localFlags;
+    QHash<QByteArray, quint16> centralFlags;
+    for (const auto &[signature, flagOffset, nameLengthOffset, nameOffset, flags] :
+         {std::tuple{QByteArrayView("PK\x03\x04"), 6, 26, 30, &localFlags}, std::tuple{QByteArrayView("PK\x01\x02"), 8, 28, 46, &centralFlags}}) {
+        for (qsizetype pos = zipData.indexOf(signature); pos != -1; pos = zipData.indexOf(signature, pos + 1)) {
+            const quint16 nameLength = qFromLittleEndian<quint16>(zipData.constData() + pos + nameLengthOffset);
+            flags->insert(zipData.mid(pos + nameOffset, nameLength), qFromLittleEndian<quint16>(zipData.constData() + pos + flagOffset));
+        }
+    }
+    QCOMPARE(localFlags.value(russianName.toUtf8()), 0x0800);
+    QCOMPARE(centralFlags.value(russianName.toUtf8()), 0x0800);
+    QCOMPARE(localFlags.value(asciiName.toUtf8(), 0xffff), 0);
+    QCOMPARE(centralFlags.value(asciiName.toUtf8(), 0xffff), 0);
+
+    QBuffer zipBuffer(&zipData);
+    KZip zip(&zipBuffer);
+    QVERIFY2(zip.open(QIODevice::ReadOnly), qPrintable(zip.errorString()));
+    QCOMPARE(zip.directory()->file(russianName)->data(), "data");
+    QCOMPARE(zip.directory()->file(asciiName)->data(), "data");
+}
+
+void KArchiveTest::testZipAppendKeepsStoredNames()
+{
+    const QString russianName = QStringLiteral("Ответы.txt");
+    const QByteArray cp866Name("\x8e\xe2\xa2\xa5\xe2\xeb.txt");
+    const quint32 cp866NameCrc = 0x556ef68c; // CRC-32 of cp866Name
+    QByteArray zipData = zipWithOneEntry(cp866Name, 0, unicodePathField(russianName.toUtf8(), cp866NameCrc));
+    {
+        QBuffer zipBuffer(&zipData);
+        KZip zip(&zipBuffer);
+        QVERIFY2(zip.open(QIODevice::ReadWrite), qPrintable(zip.errorString()));
+        QVERIFY(zip.writeFile(QStringLiteral("added.txt"), "data"));
+        QVERIFY(zip.close());
+    }
+
+    // The central directory keeps the name of the local header, with its flag
+    const qsizetype central = zipData.indexOf("PK\x01\x02");
+    QVERIFY(central != -1);
+    QCOMPARE(qFromLittleEndian<quint16>(zipData.constData() + central + 8), 0);
+    const quint16 nameLength = qFromLittleEndian<quint16>(zipData.constData() + central + 28);
+    QCOMPARE(zipData.mid(central + 46, nameLength), cp866Name);
+
+    // and its Unicode Path field, so the name does not depend on the locale
+    const QLocale defaultLocale;
+    QLocale::setDefault(QLocale(QLocale::English, QLocale::UnitedStates));
+    const auto restoreLocale = qScopeGuard([&defaultLocale] {
+        QLocale::setDefault(defaultLocale);
+    });
+
+    QBuffer zipBuffer(&zipData);
+    KZip zip(&zipBuffer);
+    QVERIFY2(zip.open(QIODevice::ReadOnly), qPrintable(zip.errorString()));
+    QStringList entries = zip.directory()->entries();
+    entries.sort();
+    QCOMPARE(entries, (QStringList{QStringLiteral("added.txt"), russianName}));
+    QCOMPARE(zip.directory()->file(QStringLiteral("added.txt"))->data(), "data");
 }
 
 void KArchiveTest::testZipOssFuzzIssue433303801()
@@ -2129,6 +2537,54 @@ void KArchiveTest::test7ZipOssFuzzIssues()
     if (k7zip.open(QIODevice::ReadOnly)) {
         k7zip.close();
     }
+}
+
+// Each archive is valid but for the coder description of its folder, which does not
+// form a coder graph the decoder can follow
+void KArchiveTest::test7ZipFolderItemRejectsInvalidCoderGraph_data()
+{
+    QTest::addColumn<QString>("fileName");
+    QTest::newRow("too_many_coders") << "data/7z_folder_too_many_coders.7z";
+    QTest::newRow("too_many_coder_streams") << "data/7z_folder_too_many_coder_streams.7z";
+    QTest::newRow("too_many_folder_streams") << "data/7z_folder_too_many_folder_streams.7z";
+    QTest::newRow("bcj2_stream_counts") << "data/7z_folder_bcj2_stream_counts.7z";
+    QTest::newRow("bind_pair_in_index") << "data/7z_folder_bind_pair_in_index.7z";
+    QTest::newRow("bind_pair_out_index") << "data/7z_folder_bind_pair_out_index.7z";
+    QTest::newRow("in_stream_bound_twice") << "data/7z_folder_in_stream_bound_twice.7z";
+    QTest::newRow("out_stream_bound_twice") << "data/7z_folder_out_stream_bound_twice.7z";
+    QTest::newRow("packed_stream_index") << "data/7z_folder_packed_stream_index.7z";
+    QTest::newRow("packed_stream_bound") << "data/7z_folder_packed_stream_bound.7z";
+    QTest::newRow("bind_pair_loop") << "data/7z_folder_bind_pair_loop.7z";
+}
+
+void KArchiveTest::test7ZipFolderItemRejectsInvalidCoderGraph()
+{
+    QFETCH(QString, fileName);
+
+    const QString filePath = QFINDTESTDATA(fileName);
+    QVERIFY(!filePath.isEmpty());
+
+    K7Zip k7zip(filePath);
+    QVERIFY(!k7zip.open(QIODevice::ReadOnly));
+}
+
+// The folder is well formed, but K7Zip decodes its BCJ2 coder before the main, call and
+// jump streams it takes, see https://bugs.kde.org/show_bug.cgi?id=509201
+void KArchiveTest::test7ZipBcj2InputsNotDecoded()
+{
+    const QString fileName = QFINDTESTDATA("data/7z_folder_bcj2_inputs_not_decoded.7z");
+    QVERIFY(!fileName.isEmpty());
+
+    K7Zip k7zip(fileName);
+    QVERIFY(k7zip.open(QIODevice::ReadOnly));
+
+    const KArchiveFile *file = k7zip.directory()->file(QStringLiteral("hello.txt"));
+    QVERIFY(file);
+    // Decoding BCJ2 must not read past the streams decoded so far: it fails, or gives the content
+    const QByteArray data = file->data();
+    QVERIFY(data.isEmpty() || data == QByteArray("Hello, World!\n"));
+
+    QVERIFY(k7zip.close());
 }
 
 #if HAVE_OPENSSL_SUPPORT
